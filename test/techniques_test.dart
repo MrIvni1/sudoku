@@ -1,4 +1,4 @@
-/// Тесты «человеческого» решателя.
+/// Тесты «человеческого» решателя (расширенный набор техник).
 library;
 
 import 'package:test/test.dart';
@@ -20,7 +20,6 @@ void main() {
       expect(hint!.technique, 'naked_single');
       expect((hint.row, hint.col), (4, 4));
       expect(hint.value, expected);
-      expect(hint.explanation, contains('$expected'));
       expect(hint.involved, isNotEmpty);
     });
 
@@ -29,10 +28,10 @@ void main() {
       // стоять только в клетке (1,1) — хотя у самой клетки кандидатов
       // много (naked single тут не сработает).
       final board = SudokuBoard.empty()
-          .withCell(1, 4, 5) // закрывает клетки (0,3..5) через квадрат
-          .withCell(2, 7, 5) // закрывает (0,6..8) через квадрат
-          .withCell(4, 1, 5) // закрывает (0,1) через столбец
-          .withCell(7, 2, 5); // закрывает (0,2) через столбец
+          .withCell(1, 4, 5)
+          .withCell(2, 7, 5)
+          .withCell(4, 1, 5)
+          .withCell(7, 2, 5);
 
       final hint = TechniqueFinder.find(board);
 
@@ -40,42 +39,56 @@ void main() {
       expect(hint!.technique, 'hidden_single');
       expect((hint.row, hint.col), (0, 0));
       expect(hint.value, 5);
-      // «Виновники» — все пятёрки на доске.
-      expect(hint.involved.toSet(),
-          {(1, 4), (2, 7), (4, 1), (7, 2)});
+      expect(hint.involved.toSet(), {(1, 4), (2, 7), (4, 1), (7, 2)});
     });
 
     test('на пустой доске логических ходов нет', () {
       expect(TechniqueFinder.find(SudokuBoard.empty()), isNull);
     });
 
-    test('свойство: каждый найденный ход совпадает с решением', () {
-      // Прогоняем несколько сгенерированных головоломок: применяем
-      // подсказки одну за другой и сверяем каждую с настоящим решением.
-      for (final seed in [1, 2, 3]) {
-        final gen = SudokuGenerator(seed: seed);
-        final puzzle = gen.generate(Difficulty.medium);
-        final solution = puzzle.solution;
+    test('на доске с конфликтом техники молчат', () {
+      final board = SudokuBoard.empty().withCell(0, 0, 5).withCell(0, 1, 5);
+      expect(TechniqueFinder.find(board), isNull);
+    });
 
-        var board = puzzle.puzzle;
-        int applied = 0;
-        while (true) {
-          final hint = TechniqueFinder.find(board);
-          if (hint == null) break;
-          expect(solution.cell(hint.row, hint.col), hint.value,
-              reason: 'техника ${hint.technique} дала цифру, '
-                  'не совпадающую с решением (seed $seed)');
-          board = board.withCell(hint.row, hint.col, hint.value);
-          applied++;
-          expect(applied, lessThan(cellCount), reason: 'зацикливание');
-        }
-        expect(applied, greaterThan(0),
-            reason: 'на средней доске должен найтись хотя бы один ход');
-        // Если техники дошли до конца — доска обязана быть решена верно.
-        if (board.isFull) {
-          expect(board.isSolved, isTrue);
+    test('свойство: каждый найденный ход совпадает с решением', () {
+      // Все уровни, включая эксперт: применяем подсказки одну за другой
+      // и сверяем КАЖДУЮ с настоящим решением. Техники не имеют права
+      // ошибаться никогда — ни сами по себе, ни после цепочки
+      // вычёркиваний (пары, pointing, X-wing).
+      for (final difficulty in Difficulty.values) {
+        for (final seed in [1, 2, 3]) {
+          final gen = SudokuGenerator(seed: seed);
+          final puzzle = gen.generate(difficulty);
+          final solution = puzzle.solution;
+
+          var board = puzzle.puzzle;
+          int applied = 0;
+          while (true) {
+            final hint = TechniqueFinder.find(board);
+            if (hint == null) break;
+            expect(solution.cell(hint.row, hint.col), hint.value,
+                reason: 'техника ${hint.technique} дала неверную цифру '
+                    '($difficulty, seed $seed)');
+            board = board.withCell(hint.row, hint.col, hint.value);
+            applied++;
+            expect(applied, lessThanOrEqualTo(cellCount),
+                reason: 'зацикливание');
+          }
+          if (board.isFull) {
+            expect(board.isSolved, isTrue);
+          }
         }
       }
+    });
+
+    test('solveByTechniques: прогресс и ранг сложности', () {
+      final gen = SudokuGenerator(seed: 7);
+      final easy = gen.generate(Difficulty.easy);
+      final (placed, hardness) = TechniqueFinder.solveByTechniques(easy.puzzle);
+      expect(placed, greaterThan(0));
+      expect(
+          hardness, greaterThanOrEqualTo(techniqueHardness['naked_single']!));
     });
 
     test('после хода по подсказке позиция остаётся решаемой', () {

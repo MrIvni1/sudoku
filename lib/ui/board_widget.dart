@@ -5,6 +5,8 @@
 /// конфликты».
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../core/board.dart';
@@ -13,7 +15,11 @@ import 'game_controller.dart';
 class BoardWidget extends StatelessWidget {
   final GameController controller;
 
-  const BoardWidget({super.key, required this.controller});
+  /// Прогресс анимации победы (0..1). Волна цвета пробегает по клеткам
+  /// по диагонали; 0 — анимации нет.
+  final double victory;
+
+  const BoardWidget({super.key, required this.controller, this.victory = 0});
 
   @override
   Widget build(BuildContext context) {
@@ -33,7 +39,10 @@ class BoardWidget extends StatelessWidget {
                     for (int col = 0; col < boardSize; col++)
                       Expanded(
                           child: _Cell(
-                              controller: controller, row: row, col: col)),
+                              controller: controller,
+                              row: row,
+                              col: col,
+                              victory: victory)),
                   ],
                 ),
               ),
@@ -48,8 +57,13 @@ class _Cell extends StatelessWidget {
   final GameController controller;
   final int row;
   final int col;
+  final double victory;
 
-  const _Cell({required this.controller, required this.row, required this.col});
+  const _Cell(
+      {required this.controller,
+      required this.row,
+      required this.col,
+      required this.victory});
 
   @override
   Widget build(BuildContext context) {
@@ -131,12 +145,27 @@ class _Cell extends StatelessWidget {
       content = null;
     }
 
+    // Волна победы: каждая клетка «вспыхивает» со сдвигом по диагонали
+    // (row + col), интенсивность — полусинус, чтобы вспыхнуть и погаснуть.
+    var cellBackground = background;
+    var scale = 1.0;
+    if (victory > 0) {
+      final t = (victory * 2.4 - (row + col) / 16.0).clamp(0.0, 1.0);
+      final intensity = math.sin(math.pi * t);
+      cellBackground =
+          Color.lerp(background, colors.tertiaryContainer, intensity * 0.9)!;
+      scale = 1.0 + 0.14 * intensity;
+    }
+
     return GestureDetector(
       onTap: () => controller.select(row, col),
       child: Container(
-        decoration: BoxDecoration(color: background, border: _border(colors)),
+        decoration:
+            BoxDecoration(color: cellBackground, border: _border(colors)),
         alignment: Alignment.center,
-        child: content,
+        child: content == null
+            ? null
+            : Transform.scale(scale: scale, child: content),
       ),
     );
   }

@@ -1,8 +1,8 @@
 /// Состояние текущей партии и операции над ним.
 ///
-/// Этап 4: автосохранение через SaveRepository, восстановление партии
-/// при запуске, статистика (победы, лучшее время, серии) и новая
-/// настройка — подсветка строки/столбца/квадрата (по просьбе игрока).
+/// Новое на этом шаге: генерация уехала в отдельный Isolate (compute),
+/// поэтому newGame стал асинхронным и появились флаги isReady /
+/// isGenerating; добавлено перемещение выбора стрелками (для клавиатуры).
 library;
 
 import 'dart:async';
@@ -15,6 +15,12 @@ import '../core/techniques.dart';
 import '../data/game_save.dart';
 import '../data/save_repository.dart';
 
+/// Задача для Isolate. По правилам compute это должна быть функция
+/// верхнего уровня (или статическая): Isolate не может забрать с собой
+/// замыкание с контекстом — только чистую функцию и сообщение.
+GeneratedPuzzle _generatePuzzleTask(Difficulty difficulty) =>
+    SudokuGenerator().generate(difficulty);
+
 class _Snapshot {
   final SudokuBoard board;
   final List<Set<int>> notes;
@@ -24,7 +30,6 @@ class _Snapshot {
 class GameController extends ChangeNotifier {
   static const int hintsPerGame = 3;
 
-  final SudokuGenerator _generator = SudokuGenerator();
   final SaveRepository _repository;
 
   late GeneratedPuzzle _puzzle;
@@ -38,22 +43,23 @@ class GameController extends ChangeNotifier {
   int? selectedCol;
   bool notesMode = false;
   bool highlightConflicts = true;
-  bool highlightPeers = true; // подсветка строки/столбца/квадрата
-  bool highlightSameDigit = true; // подсветка одинаковых цифр
+  bool highlightPeers = true;
+  bool highlightSameDigit = true;
   int hintsLeft = hintsPerGame;
   int errorCount = 0;
 
-  /// Последняя умная подсказка: пока не null, экран показывает карточку
-  /// с объяснением, а поле подсвечивает клетки-«виновники».
-  /// Сбрасывается любым следующим действием игрока.
   TechniqueHint? activeHint;
 
+  /// Партия загружена и готова к показу. До первого newGame/restore —
+  /// false, и UI обязан показывать заглушку, не трогая board.
+  bool _ready = false;
+  bool get isReady => _ready;
+
+  /// Идёт фоновая генерация новой головоломки.
+  bool isGenerating = false;
+
   final Stopwatch _stopwatch = Stopwatch();
-
-  /// Stopwatch нельзя «завести» с нужного значения, поэтому время из
-  /// сохранения храним отдельным слагаемым: elapsed = офсет + секундомер.
   Duration _elapsedOffset = Duration.zero;
-
   Timer? _ticker;
   int _tickCount = 0;
   bool _paused = false;
@@ -62,15 +68,12 @@ class GameController extends ChangeNotifier {
     stats = _repository.loadStats();
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (_stopwatch.isRunning) {
-        // Время партии тоже часть сохранения, но писать на диск каждую
-        // секунду расточительно — пишем раз в 10 секунд. При любом ходе
-        // игрока сохранение и так происходит сразу.
         if (++_tickCount % 10 == 0) _persist();
         notifyListeners();
       }
     });
     if (!_tryRestore()) {
-      newGame(Difficulty.easy);
+      unawaited(newGame(Difficulty.easy));
     }
   }
 
@@ -84,7 +87,7 @@ class GameController extends ChangeNotifier {
 
   SudokuBoard get board => _board;
   Difficulty get difficulty => _puzzle.difficulty;
-  bool get isSolved => _board.isSolved;
+  bool get isSolved => _ready && _board.isSolved;
   bool get isPaused => _paused;
   bool get canUndo => _history.isNotEmpty;
   Duration get elapsed => _elapsedOffset + _stopwatch.elapsed;
@@ -112,18 +115,31 @@ class GameController extends ChangeNotifier {
     return row == sr || col == sc || sameBox;
   }
 
-  /// Партия «начата»: игрок сделал хоть один ход относительно исходной
-  /// головоломки. Нужно для честного подсчёта серий.
   bool get _hasProgress =>
       !listEquals(_board.toMutableList(), _puzzle.puzzle.toMutableList());
 
   // ---------- Действия игрока ----------
 
   void select(int row, int col) {
-    if (_paused) return;
-    activeHint = null; // любое действие закрывает объяснение
+    if (_paused || !_ready) return;
+    activeHint = null;
     selectedRow = row;
     selectedCol = col;
+    notifyListeners();
+  }
+
+  /// Перемещение выбора стрелками (клавиатура на web/десктопе).
+  /// Если ничего не выбрано — встаём в левый верхний угол.
+  void moveSelection(int dRow, int dCol) {
+    if (_paused || !_ready) return;
+    activeHint = null;
+    if (selectedRow == null || selectedCol == null) {
+      selectedRow = 0;
+      selectedCol = 0;
+    } else {
+      selectedRow = (selectedRow! + dRow).clamp(0, boardSize - 1);
+      selectedCol = (selectedCol! + dCol).clamp(0, boardSize - 1);
+    }
     notifyListeners();
   }
 
@@ -154,7 +170,8 @@ class GameController extends ChangeNotifier {
 
   void input(int digit) {
     final r = selectedRow, c = selectedCol;
-    if (r == null || c == null || isGiven(r, c) || isSolved || _paused) return;
+    if (!_ready || r == null || c == null) return;
+    if (isGiven(r, c) || isSolved || _paused) return;
 
     activeHint = null;
     if (notesMode) {
@@ -185,7 +202,8 @@ class GameController extends ChangeNotifier {
 
   void erase() {
     final r = selectedRow, c = selectedCol;
-    if (r == null || c == null || isGiven(r, c) || isSolved || _paused) return;
+    if (!_ready || r == null || c == null) return;
+    if (isGiven(r, c) || isSolved || _paused) return;
     if (_board.cell(r, c) == 0 && notesAt(r, c).isEmpty) return;
     activeHint = null;
     _pushHistory();
@@ -195,25 +213,17 @@ class GameController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Умная подсказка. Сначала пытаемся найти ЛОГИЧЕСКИЙ ход техниками
-  /// (naked/hidden single) — тогда игрок получает и цифру, и объяснение,
-  /// и подсветку клеток, из-за которых вывод верен. Если техники
-  /// бессильны (или позиция «отравлена» ошибками игрока) — честный
-  /// fallback: просто открыть правильную цифру, как раньше.
+  /// Умная подсказка: логический ход с объяснением; fallback — открыть
+  /// правильную цифру.
   void useHint() {
-    if (isSolved || _paused || hintsLeft <= 0) return;
+    if (!_ready || isSolved || _paused || hintsLeft <= 0) return;
 
-    // 1) Логический ход. На доске с конфликтами техники не запускаем:
-    // их выводы опираются на корректность позиции.
-    TechniqueHint? found;
-    if (!_board.hasConflicts) {
-      found = TechniqueFinder.find(_board);
-      // Ошибочные (но не конфликтующие) цифры игрока могли увести
-      // позицию от настоящего решения — сверяем вывод техники с ним.
-      if (found != null &&
-          _puzzle.solution.cell(found.row, found.col) != found.value) {
-        found = null;
-      }
+    TechniqueHint? found = TechniqueFinder.find(_board);
+    // Ошибочные (но не конфликтующие) цифры игрока могли увести позицию
+    // от настоящего решения — сверяем вывод техники с ним.
+    if (found != null &&
+        _puzzle.solution.cell(found.row, found.col) != found.value) {
+      found = null;
     }
 
     if (found != null) {
@@ -231,7 +241,7 @@ class GameController extends ChangeNotifier {
       return;
     }
 
-    // 2) Fallback: открыть цифру в выбранной клетке (или первой неверной).
+    // Fallback: выбранная клетка или первая неверная.
     var r = selectedRow, c = selectedCol;
     final needsPick = r == null ||
         c == null ||
@@ -250,7 +260,7 @@ class GameController extends ChangeNotifier {
         }
       }
     }
-    if (r == null || c == null) return; // всё уже верно
+    if (r == null || c == null) return;
 
     final correct = _puzzle.solution.cell(r, c);
     _pushHistory();
@@ -267,7 +277,7 @@ class GameController extends ChangeNotifier {
   }
 
   void undo() {
-    if (_history.isEmpty || isSolved || _paused) return;
+    if (!_ready || _history.isEmpty || isSolved || _paused) return;
     activeHint = null;
     final snapshot = _history.removeLast();
     _board = snapshot.board;
@@ -277,7 +287,7 @@ class GameController extends ChangeNotifier {
   }
 
   void togglePause() {
-    if (isSolved) return;
+    if (!_ready || isSolved) return;
     activeHint = null;
     _paused = !_paused;
     _paused ? _stopwatch.stop() : _stopwatch.start();
@@ -285,23 +295,28 @@ class GameController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void newGame(Difficulty difficulty) {
-    // Бросили начатую партию — серия побед обрывается.
-    // (В конструкторе _puzzle ещё не создана — тогда и рвать нечего.)
-    try {
-      if (_hasProgress && !isSolved) {
-        stats.recordAbandon();
-        _repository.saveStats(stats);
-      }
-    } catch (_) {
-      // первая инициализация, _puzzle ещё нет — это нормально
+  /// Новая партия. Генерация выполняется в отдельном Isolate через
+  /// compute(): UI-поток свободен, интерфейс не замирает даже если
+  /// экспертная доска решит посопротивляться. На web compute выполнится
+  /// в основном потоке (изолятов там нет) — для наших миллисекунд ок.
+  Future<void> newGame(Difficulty difficulty) async {
+    if (isGenerating) return;
+
+    if (_ready && _hasProgress && !isSolved) {
+      stats.recordAbandon();
+      await _repository.saveStats(stats);
     }
 
-    _puzzle = _generator.generate(difficulty);
+    isGenerating = true;
+    notifyListeners();
+
+    final puzzle = await compute(_generatePuzzleTask, difficulty);
+
+    _puzzle = puzzle;
     _board = _puzzle.puzzle;
     _notes = List.generate(cellCount, (_) => <int>{});
-    activeHint = null;
     _history.clear();
+    activeHint = null;
     selectedRow = null;
     selectedCol = null;
     notesMode = false;
@@ -312,15 +327,14 @@ class GameController extends ChangeNotifier {
     _stopwatch
       ..reset()
       ..start();
+    isGenerating = false;
+    _ready = true;
     _persist();
     notifyListeners();
   }
 
   // ---------- Сохранение и восстановление ----------
 
-  /// Попытка продолжить сохранённую партию. Возвращаемся в состоянии
-  /// паузы — пусть игрок осмотрится и сам нажмёт «продолжить»,
-  /// а не обнаружит тикающий таймер.
   bool _tryRestore() {
     final save = _repository.loadGame();
     if (save == null) return false;
@@ -337,17 +351,17 @@ class GameController extends ChangeNotifier {
       _elapsedOffset = Duration(seconds: save.elapsedSeconds);
       _stopwatch.reset();
       _paused = true;
+      _ready = true;
       notifyListeners();
       return true;
     } catch (_) {
-      // Битое сохранение (SudokuBoard.fromList бросил исключение и т.п.)
       _repository.clearGame();
       return false;
     }
   }
 
   void _persist() {
-    if (isSolved) return; // решённые партии не храним — их место в статистике
+    if (!_ready || isSolved) return;
     _repository.saveGame(GameSave(
       puzzle: _puzzle.puzzle.toMutableList(),
       solution: _puzzle.solution.toMutableList(),
@@ -388,6 +402,6 @@ class GameController extends ChangeNotifier {
     _stopwatch.stop();
     stats.recordWin(difficulty.name, elapsed.inSeconds);
     _repository.saveStats(stats);
-    _repository.clearGame(); // партия окончена — сохранение больше не нужно
+    _repository.clearGame();
   }
 }
