@@ -1,19 +1,13 @@
 /// Отрисовка поля 9×9.
 ///
-/// Устройство: Column из 9 Row, в каждой — 9 клеток через Expanded,
-/// всё внутри AspectRatio(1.0), чтобы поле всегда было квадратным
-/// и растягивалось под доступное место. Для 81 клетки этого достаточно;
-/// CustomPaint понадобился бы для тысяч элементов, но не здесь.
-///
-/// Толстые линии между квадратами 3×3 сделаны через границы клеток:
-/// каждая клетка рисует свою правую и нижнюю границу (тонкую или
-/// толстую — если она третья по счёту), а внешнюю рамку рисует
-/// общий контейнер. Так линии не «двоятся».
+/// Этап 3: клетки научились показывать заметки (мини-сетка 3×3 с
+/// кандидатами), прятаться на паузе и уважать настройку «подсвечивать
+/// конфликты».
 library;
 
 import 'package:flutter/material.dart';
 
-import '../../core/board.dart';
+import '../core/board.dart';
 import 'game_controller.dart';
 
 class BoardWidget extends StatelessWidget {
@@ -60,19 +54,31 @@ class _Cell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+
+    // На паузе поле «зашторено»: ни цифр, ни заметок, ни выделений —
+    // чтобы нельзя было разглядывать позицию с остановленным таймером.
+    if (controller.isPaused) {
+      return Container(
+        decoration: BoxDecoration(
+          color: colors.surfaceContainerHighest,
+          border: _border(colors),
+        ),
+      );
+    }
+
     final value = controller.board.cell(row, col);
+    final notes = controller.notesAt(row, col);
 
     final isSelected =
         controller.selectedRow == row && controller.selectedCol == col;
     final isPeer = controller.isPeerOfSelection(row, col);
-    // Подсветка «таких же цифр»: помогает игроку видеть, где уже стоит
-    // цифра, которую он рассматривает.
     final sameDigit =
         value != 0 && value == controller.selectedValue && !isSelected;
-    final isConflict = controller.isConflict(row, col);
+    // Конфликт вычисляется всегда, а вот показывается — по настройке.
+    final isConflict =
+        controller.highlightConflicts && controller.isConflict(row, col);
     final isGiven = controller.isGiven(row, col);
 
-    // Приоритет фонов: выбранная > та же цифра > соседи > обычная.
     final Color background;
     if (isSelected) {
       background = colors.primaryContainer;
@@ -84,7 +90,6 @@ class _Cell extends StatelessWidget {
       background = colors.surface;
     }
 
-    // Цвет цифры: конфликт > подсказка > ход игрока.
     final Color digitColor;
     if (isConflict) {
       digitColor = colors.error;
@@ -94,45 +99,90 @@ class _Cell extends StatelessWidget {
       digitColor = colors.primary;
     }
 
-    // Правая/нижняя граница: толстая на стыке квадратов 3×3.
-    final thin = BorderSide(color: colors.outlineVariant, width: 0.5);
-    final thick = BorderSide(color: colors.onSurface, width: 1.8);
-    final isThickRight = (col + 1) % boxSize == 0 && col != boardSize - 1;
-    final isThickBottom = (row + 1) % boxSize == 0 && row != boardSize - 1;
+    final Widget? content;
+    if (value != 0) {
+      content = FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Padding(
+          padding: const EdgeInsets.all(6),
+          child: Text(
+            '$value',
+            style: TextStyle(
+              fontSize: 28,
+              color: digitColor,
+              fontWeight: isGiven ? FontWeight.w600 : FontWeight.w400,
+            ),
+          ),
+        ),
+      );
+    } else if (notes.isNotEmpty) {
+      content = _NotesGrid(notes: notes, color: colors.onSurfaceVariant);
+    } else {
+      content = null;
+    }
 
     return GestureDetector(
       onTap: () => controller.select(row, col),
       child: Container(
-        decoration: BoxDecoration(
-          color: background,
-          border: Border(
-            right: col == boardSize - 1
-                ? BorderSide.none
-                : (isThickRight ? thick : thin),
-            bottom: row == boardSize - 1
-                ? BorderSide.none
-                : (isThickBottom ? thick : thin),
-          ),
-        ),
+        decoration: BoxDecoration(color: background, border: _border(colors)),
         alignment: Alignment.center,
-        // FittedBox масштабирует цифру под размер клетки — на телефоне
-        // и на большом мониторе пропорции сохранятся сами.
-        child: value == 0
-            ? null
-            : FittedBox(
-                fit: BoxFit.scaleDown,
-                child: Padding(
-                  padding: const EdgeInsets.all(6),
-                  child: Text(
-                    '$value',
-                    style: TextStyle(
-                      fontSize: 28,
-                      color: digitColor,
-                      fontWeight: isGiven ? FontWeight.w600 : FontWeight.w400,
+        child: content,
+      ),
+    );
+  }
+
+  Border _border(ColorScheme colors) {
+    final thin = BorderSide(color: colors.outlineVariant, width: 0.5);
+    final thick = BorderSide(color: colors.onSurface, width: 1.8);
+    final isThickRight = (col + 1) % boxSize == 0 && col != boardSize - 1;
+    final isThickBottom = (row + 1) % boxSize == 0 && row != boardSize - 1;
+    return Border(
+      right: col == boardSize - 1
+          ? BorderSide.none
+          : (isThickRight ? thick : thin),
+      bottom: row == boardSize - 1
+          ? BorderSide.none
+          : (isThickBottom ? thick : thin),
+    );
+  }
+}
+
+/// Мини-сетка 3×3 с кандидатами. Каждая цифра всегда на «своём» месте:
+/// 1 — левый верхний угол, 5 — центр, 9 — правый нижний. Так глаз игрока
+/// находит кандидата мгновенно, не читая клетку целиком.
+class _NotesGrid extends StatelessWidget {
+  final Set<int> notes;
+  final Color color;
+
+  const _NotesGrid({required this.notes, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(2),
+      child: Column(
+        children: [
+          for (int r = 0; r < 3; r++)
+            Expanded(
+              child: Row(
+                children: [
+                  for (int c = 0; c < 3; c++)
+                    Expanded(
+                      child: Center(
+                        child: notes.contains(r * 3 + c + 1)
+                            ? FittedBox(
+                                child: Text(
+                                  '${r * 3 + c + 1}',
+                                  style: TextStyle(fontSize: 10, color: color),
+                                ),
+                              )
+                            : const SizedBox.shrink(),
+                      ),
                     ),
-                  ),
-                ),
+                ],
               ),
+            ),
+        ],
       ),
     );
   }
