@@ -67,6 +67,11 @@ class _GameScreenState extends State<GameScreen> {
                 onTap: _controller.toggleHighlightPeers,
                 child: const Text('Подсвечивать строку и квадрат'),
               ),
+              CheckedPopupMenuItem(
+                checked: _controller.highlightSameDigit,
+                onTap: _controller.toggleHighlightSameDigit,
+                child: const Text('Подсвечивать одинаковые цифры'),
+              ),
             ],
           ),
           PopupMenuButton<Difficulty>(
@@ -118,6 +123,10 @@ class _GameScreenState extends State<GameScreen> {
                     children: [
                       _statusRow(context),
                       const SizedBox(height: 16),
+                      if (_controller.activeHint != null) ...[
+                        _hintCard(context),
+                        const SizedBox(height: 12),
+                      ],
                       SizedBox(
                         width: 340,
                         child: InputPanel(controller: _controller),
@@ -142,6 +151,56 @@ class _GameScreenState extends State<GameScreen> {
             );
           },
         ),
+      ),
+    );
+  }
+
+  /// Карточка с объяснением умной подсказки. Клетки-«виновники»
+  /// в этот момент подсвечены на поле третьим цветом.
+  Widget _hintCard(BuildContext context) {
+    final hint = _controller.activeHint!;
+    final colors = Theme.of(context).colorScheme;
+    const techniqueNames = {
+      'naked_single': 'Единственный кандидат',
+      'hidden_single': 'Единственное место',
+    };
+    return Container(
+      width: 340,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: colors.tertiaryContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.lightbulb,
+                  size: 18, color: colors.onTertiaryContainer),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  techniqueNames[hint.technique] ?? hint.technique,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: colors.onTertiaryContainer,
+                  ),
+                ),
+              ),
+              InkWell(
+                onTap: _controller.dismissHint,
+                child: Icon(Icons.close,
+                    size: 18, color: colors.onTertiaryContainer),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            hint.explanation,
+            style: TextStyle(color: colors.onTertiaryContainer),
+          ),
+        ],
       ),
     );
   }

@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 
 import '../core/board.dart';
 import '../core/generator.dart';
+import '../core/techniques.dart';
 import '../data/game_save.dart';
 import '../data/save_repository.dart';
 
@@ -38,8 +39,14 @@ class GameController extends ChangeNotifier {
   bool notesMode = false;
   bool highlightConflicts = true;
   bool highlightPeers = true; // подсветка строки/столбца/квадрата
+  bool highlightSameDigit = true; // подсветка одинаковых цифр
   int hintsLeft = hintsPerGame;
   int errorCount = 0;
+
+  /// Последняя умная подсказка: пока не null, экран показывает карточку
+  /// с объяснением, а поле подсвечивает клетки-«виновники».
+  /// Сбрасывается любым следующим действием игрока.
+  TechniqueHint? activeHint;
 
   final Stopwatch _stopwatch = Stopwatch();
 
@@ -114,6 +121,7 @@ class GameController extends ChangeNotifier {
 
   void select(int row, int col) {
     if (_paused) return;
+    activeHint = null; // любое действие закрывает объяснение
     selectedRow = row;
     selectedCol = col;
     notifyListeners();
@@ -134,10 +142,21 @@ class GameController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void toggleHighlightSameDigit() {
+    highlightSameDigit = !highlightSameDigit;
+    notifyListeners();
+  }
+
+  void dismissHint() {
+    activeHint = null;
+    notifyListeners();
+  }
+
   void input(int digit) {
     final r = selectedRow, c = selectedCol;
     if (r == null || c == null || isGiven(r, c) || isSolved || _paused) return;
 
+    activeHint = null;
     if (notesMode) {
       if (_board.cell(r, c) != 0) return;
       _pushHistory();
@@ -168,6 +187,7 @@ class GameController extends ChangeNotifier {
     final r = selectedRow, c = selectedCol;
     if (r == null || c == null || isGiven(r, c) || isSolved || _paused) return;
     if (_board.cell(r, c) == 0 && notesAt(r, c).isEmpty) return;
+    activeHint = null;
     _pushHistory();
     _board = _board.withCell(r, c, 0);
     notesAt(r, c).clear();
@@ -175,18 +195,72 @@ class GameController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Умная подсказка. Сначала пытаемся найти ЛОГИЧЕСКИЙ ход техниками
+  /// (naked/hidden single) — тогда игрок получает и цифру, и объяснение,
+  /// и подсветку клеток, из-за которых вывод верен. Если техники
+  /// бессильны (или позиция «отравлена» ошибками игрока) — честный
+  /// fallback: просто открыть правильную цифру, как раньше.
   void useHint() {
-    final r = selectedRow, c = selectedCol;
-    if (r == null || c == null || isGiven(r, c) || isSolved || _paused) return;
-    if (hintsLeft <= 0) return;
-    final correct = _puzzle.solution.cell(r, c);
-    if (_board.cell(r, c) == correct) return;
+    if (isSolved || _paused || hintsLeft <= 0) return;
 
+    // 1) Логический ход. На доске с конфликтами техники не запускаем:
+    // их выводы опираются на корректность позиции.
+    TechniqueHint? found;
+    if (!_board.hasConflicts) {
+      found = TechniqueFinder.find(_board);
+      // Ошибочные (но не конфликтующие) цифры игрока могли увести
+      // позицию от настоящего решения — сверяем вывод техники с ним.
+      if (found != null &&
+          _puzzle.solution.cell(found.row, found.col) != found.value) {
+        found = null;
+      }
+    }
+
+    if (found != null) {
+      _pushHistory();
+      hintsLeft--;
+      selectedRow = found.row;
+      selectedCol = found.col;
+      _board = _board.withCell(found.row, found.col, found.value);
+      notesAt(found.row, found.col).clear();
+      _clearPeerNotes(found.row, found.col, found.value);
+      activeHint = found;
+      _checkFinished();
+      _persist();
+      notifyListeners();
+      return;
+    }
+
+    // 2) Fallback: открыть цифру в выбранной клетке (или первой неверной).
+    var r = selectedRow, c = selectedCol;
+    final needsPick = r == null ||
+        c == null ||
+        isGiven(r, c) ||
+        _board.cell(r, c) == _puzzle.solution.cell(r, c);
+    if (needsPick) {
+      (r, c) = (null, null);
+      outer:
+      for (int i = 0; i < boardSize; i++) {
+        for (int j = 0; j < boardSize; j++) {
+          if (!isGiven(i, j) &&
+              _board.cell(i, j) != _puzzle.solution.cell(i, j)) {
+            (r, c) = (i, j);
+            break outer;
+          }
+        }
+      }
+    }
+    if (r == null || c == null) return; // всё уже верно
+
+    final correct = _puzzle.solution.cell(r, c);
     _pushHistory();
     hintsLeft--;
+    selectedRow = r;
+    selectedCol = c;
     _board = _board.withCell(r, c, correct);
     notesAt(r, c).clear();
     _clearPeerNotes(r, c, correct);
+    activeHint = null;
     _checkFinished();
     _persist();
     notifyListeners();
@@ -194,6 +268,7 @@ class GameController extends ChangeNotifier {
 
   void undo() {
     if (_history.isEmpty || isSolved || _paused) return;
+    activeHint = null;
     final snapshot = _history.removeLast();
     _board = snapshot.board;
     _notes = snapshot.notes;
@@ -203,6 +278,7 @@ class GameController extends ChangeNotifier {
 
   void togglePause() {
     if (isSolved) return;
+    activeHint = null;
     _paused = !_paused;
     _paused ? _stopwatch.stop() : _stopwatch.start();
     _persist();
@@ -224,6 +300,7 @@ class GameController extends ChangeNotifier {
     _puzzle = _generator.generate(difficulty);
     _board = _puzzle.puzzle;
     _notes = List.generate(cellCount, (_) => <int>{});
+    activeHint = null;
     _history.clear();
     selectedRow = null;
     selectedCol = null;

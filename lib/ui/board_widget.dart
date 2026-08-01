@@ -74,16 +74,24 @@ class _Cell extends StatelessWidget {
     // Подсветка строки/столбца/квадрата — по настройке (этап 4).
     final isPeer =
         controller.highlightPeers && controller.isPeerOfSelection(row, col);
-    final sameDigit =
-        value != 0 && value == controller.selectedValue && !isSelected;
+    final sameDigit = controller.highlightSameDigit &&
+        value != 0 &&
+        value == controller.selectedValue &&
+        !isSelected;
+    // Клетки-«виновники» активной умной подсказки.
+    final isInvolved =
+        controller.activeHint?.involved.contains((row, col)) ?? false;
     // Конфликт вычисляется всегда, а вот показывается — по настройке.
     final isConflict =
         controller.highlightConflicts && controller.isConflict(row, col);
     final isGiven = controller.isGiven(row, col);
 
+    // Приоритет фонов: выбранная > виновники подсказки > та же цифра > соседи.
     final Color background;
     if (isSelected) {
       background = colors.primaryContainer;
+    } else if (isInvolved) {
+      background = colors.tertiaryContainer;
     } else if (sameDigit) {
       background = colors.secondaryContainer;
     } else if (isPeer) {
