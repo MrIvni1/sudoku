@@ -9,6 +9,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # Локальное хранилище: чистый Dart, работает офлайн на всех платформах
+  # (iOS/Android — файлы приложения, web — IndexedDB браузера).
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
 
 dev_dependencies:
   flutter_test:

@@ -71,7 +71,9 @@ class _Cell extends StatelessWidget {
 
     final isSelected =
         controller.selectedRow == row && controller.selectedCol == col;
-    final isPeer = controller.isPeerOfSelection(row, col);
+    // Подсветка строки/столбца/квадрата — по настройке (этап 4).
+    final isPeer =
+        controller.highlightPeers && controller.isPeerOfSelection(row, col);
     final sameDigit =
         value != 0 && value == controller.selectedValue && !isSelected;
     // Конфликт вычисляется всегда, а вот показывается — по настройке.

@@ -1,9 +1,8 @@
 /// Состояние текущей партии и операции над ним.
 ///
-/// Этап 3 добавил: историю ходов (undo), заметки-кандидаты, подсказки
-/// с лимитом, таймер с паузой, счётчик ошибок и настройку подсветки
-/// конфликтов. Обратите внимание, что core/ не изменился ни на строчку —
-/// вся новая механика уместилась в контроллере и виджетах.
+/// Этап 4: автосохранение через SaveRepository, восстановление партии
+/// при запуске, статистика (победы, лучшее время, серии) и новая
+/// настройка — подсветка строки/столбца/квадрата (по просьбе игрока).
 library;
 
 import 'dart:async';
@@ -12,13 +11,9 @@ import 'package:flutter/foundation.dart';
 
 import '../core/board.dart';
 import '../core/generator.dart';
+import '../data/game_save.dart';
+import '../data/save_repository.dart';
 
-/// Снимок состояния для undo: доска + заметки на момент ДО хода.
-///
-/// Здесь окупается неизменяемость SudokuBoard: старую доску можно
-/// просто положить в список — никакой будущий ход её не испортит,
-/// потому что каждый ход создаёт новый объект. Заметки же — обычные
-/// изменяемые Set'ы, поэтому их приходится копировать вручную.
 class _Snapshot {
   final SudokuBoard board;
   final List<Set<int>> notes;
@@ -29,14 +24,12 @@ class GameController extends ChangeNotifier {
   static const int hintsPerGame = 3;
 
   final SudokuGenerator _generator = SudokuGenerator();
+  final SaveRepository _repository;
 
   late GeneratedPuzzle _puzzle;
   late SudokuBoard _board;
-
-  /// Заметки-кандидаты: по Set цифр на каждую из 81 клетки.
-  /// Живут в контроллере, а не в SudokuBoard: ядро знает только правила
-  /// судоку, а заметки — деталь интерфейса, правилам они безразличны.
   late List<Set<int>> _notes;
+  late GameStats stats;
 
   final List<_Snapshot> _history = [];
 
@@ -44,26 +37,39 @@ class GameController extends ChangeNotifier {
   int? selectedCol;
   bool notesMode = false;
   bool highlightConflicts = true;
+  bool highlightPeers = true; // подсветка строки/столбца/квадрата
   int hintsLeft = hintsPerGame;
   int errorCount = 0;
 
   final Stopwatch _stopwatch = Stopwatch();
+
+  /// Stopwatch нельзя «завести» с нужного значения, поэтому время из
+  /// сохранения храним отдельным слагаемым: elapsed = офсет + секундомер.
+  Duration _elapsedOffset = Duration.zero;
+
   Timer? _ticker;
+  int _tickCount = 0;
   bool _paused = false;
 
-  GameController() {
-    // Stopwatch умеет измерять время, но не умеет «сообщать» о его ходе.
-    // Поэтому раз в секунду будим слушателей сами — только когда часы
-    // идут, чтобы на паузе и после победы не перерисовываться впустую.
+  GameController(this._repository) {
+    stats = _repository.loadStats();
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (_stopwatch.isRunning) notifyListeners();
+      if (_stopwatch.isRunning) {
+        // Время партии тоже часть сохранения, но писать на диск каждую
+        // секунду расточительно — пишем раз в 10 секунд. При любом ходе
+        // игрока сохранение и так происходит сразу.
+        if (++_tickCount % 10 == 0) _persist();
+        notifyListeners();
+      }
     });
-    newGame(Difficulty.easy);
+    if (!_tryRestore()) {
+      newGame(Difficulty.easy);
+    }
   }
 
   @override
   void dispose() {
-    _ticker?.cancel(); // иначе таймер переживёт экран — утечка
+    _ticker?.cancel();
     super.dispose();
   }
 
@@ -74,7 +80,7 @@ class GameController extends ChangeNotifier {
   bool get isSolved => _board.isSolved;
   bool get isPaused => _paused;
   bool get canUndo => _history.isNotEmpty;
-  Duration get elapsed => _stopwatch.elapsed;
+  Duration get elapsed => _elapsedOffset + _stopwatch.elapsed;
 
   Set<int> notesAt(int row, int col) => _notes[row * boardSize + col];
 
@@ -99,6 +105,11 @@ class GameController extends ChangeNotifier {
     return row == sr || col == sc || sameBox;
   }
 
+  /// Партия «начата»: игрок сделал хоть один ход относительно исходной
+  /// головоломки. Нужно для честного подсчёта серий.
+  bool get _hasProgress =>
+      !listEquals(_board.toMutableList(), _puzzle.puzzle.toMutableList());
+
   // ---------- Действия игрока ----------
 
   void select(int row, int col) {
@@ -118,57 +129,58 @@ class GameController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Цифра из панели. В обычном режиме ставит/стирает цифру,
-  /// в режиме заметок — включает/выключает кандидата в пустой клетке.
+  void toggleHighlightPeers() {
+    highlightPeers = !highlightPeers;
+    notifyListeners();
+  }
+
   void input(int digit) {
     final r = selectedRow, c = selectedCol;
     if (r == null || c == null || isGiven(r, c) || isSolved || _paused) return;
 
     if (notesMode) {
-      if (_board.cell(r, c) != 0) return; // заметки — только в пустых
+      if (_board.cell(r, c) != 0) return;
       _pushHistory();
       final cellNotes = notesAt(r, c);
       cellNotes.contains(digit)
           ? cellNotes.remove(digit)
           : cellNotes.add(digit);
+      _persist();
       notifyListeners();
       return;
     }
 
     _pushHistory();
-    final next = _board.cell(r, c) == digit ? 0 : digit; // повтор = стереть
+    final next = _board.cell(r, c) == digit ? 0 : digit;
     _board = _board.withCell(r, c, next);
-    notesAt(r, c).clear(); // цифра вытесняет заметки в своей клетке
+    notesAt(r, c).clear();
 
     if (next != 0) {
-      // Ошибка — это цифра, не совпадающая с решением. Конфликты
-      // (дубль в строке) — отдельная, чисто визуальная подсветка.
       if (next != _puzzle.solution.cell(r, c)) errorCount++;
       _clearPeerNotes(r, c, next);
     }
     _checkFinished();
+    _persist();
     notifyListeners();
   }
 
   void erase() {
     final r = selectedRow, c = selectedCol;
     if (r == null || c == null || isGiven(r, c) || isSolved || _paused) return;
-    if (_board.cell(r, c) == 0 && notesAt(r, c).isEmpty) return; // нечего
+    if (_board.cell(r, c) == 0 && notesAt(r, c).isEmpty) return;
     _pushHistory();
     _board = _board.withCell(r, c, 0);
     notesAt(r, c).clear();
+    _persist();
     notifyListeners();
   }
 
-  /// Подсказка: открыть правильную цифру в выбранной клетке.
-  /// Решение головоломки генератор дал нам ещё на этапе 1 —
-  /// вот и первое применение.
   void useHint() {
     final r = selectedRow, c = selectedCol;
     if (r == null || c == null || isGiven(r, c) || isSolved || _paused) return;
     if (hintsLeft <= 0) return;
     final correct = _puzzle.solution.cell(r, c);
-    if (_board.cell(r, c) == correct) return; // уже верно — не тратим
+    if (_board.cell(r, c) == correct) return;
 
     _pushHistory();
     hintsLeft--;
@@ -176,18 +188,16 @@ class GameController extends ChangeNotifier {
     notesAt(r, c).clear();
     _clearPeerNotes(r, c, correct);
     _checkFinished();
+    _persist();
     notifyListeners();
   }
 
-  /// Отмена последнего хода. Счётчик ошибок сознательно НЕ откатываем:
-  /// иначе связка «ошибся → undo» обнуляла бы цену ошибки. Ошибка —
-  /// это событие («игрок ошибся»), а не часть позиции на доске.
-  /// Потраченные подсказки не возвращаем по той же причине.
   void undo() {
     if (_history.isEmpty || isSolved || _paused) return;
     final snapshot = _history.removeLast();
     _board = snapshot.board;
     _notes = snapshot.notes;
+    _persist();
     notifyListeners();
   }
 
@@ -195,10 +205,22 @@ class GameController extends ChangeNotifier {
     if (isSolved) return;
     _paused = !_paused;
     _paused ? _stopwatch.stop() : _stopwatch.start();
+    _persist();
     notifyListeners();
   }
 
   void newGame(Difficulty difficulty) {
+    // Бросили начатую партию — серия побед обрывается.
+    // (В конструкторе _puzzle ещё не создана — тогда и рвать нечего.)
+    try {
+      if (_hasProgress && !isSolved) {
+        stats.recordAbandon();
+        _repository.saveStats(stats);
+      }
+    } catch (_) {
+      // первая инициализация, _puzzle ещё нет — это нормально
+    }
+
     _puzzle = _generator.generate(difficulty);
     _board = _puzzle.puzzle;
     _notes = List.generate(cellCount, (_) => <int>{});
@@ -209,26 +231,67 @@ class GameController extends ChangeNotifier {
     hintsLeft = hintsPerGame;
     errorCount = 0;
     _paused = false;
+    _elapsedOffset = Duration.zero;
     _stopwatch
       ..reset()
       ..start();
+    _persist();
     notifyListeners();
+  }
+
+  // ---------- Сохранение и восстановление ----------
+
+  /// Попытка продолжить сохранённую партию. Возвращаемся в состоянии
+  /// паузы — пусть игрок осмотрится и сам нажмёт «продолжить»,
+  /// а не обнаружит тикающий таймер.
+  bool _tryRestore() {
+    final save = _repository.loadGame();
+    if (save == null) return false;
+    try {
+      _puzzle = GeneratedPuzzle(
+        puzzle: SudokuBoard.fromList(save.puzzle),
+        solution: SudokuBoard.fromList(save.solution),
+        difficulty: Difficulty.values[save.difficultyIndex],
+      );
+      _board = SudokuBoard.fromList(save.board);
+      _notes = [for (final cell in save.notes) Set<int>.from(cell)];
+      hintsLeft = save.hintsLeft;
+      errorCount = save.errorCount;
+      _elapsedOffset = Duration(seconds: save.elapsedSeconds);
+      _stopwatch.reset();
+      _paused = true;
+      notifyListeners();
+      return true;
+    } catch (_) {
+      // Битое сохранение (SudokuBoard.fromList бросил исключение и т.п.)
+      _repository.clearGame();
+      return false;
+    }
+  }
+
+  void _persist() {
+    if (isSolved) return; // решённые партии не храним — их место в статистике
+    _repository.saveGame(GameSave(
+      puzzle: _puzzle.puzzle.toMutableList(),
+      solution: _puzzle.solution.toMutableList(),
+      board: _board.toMutableList(),
+      notes: [for (final s in _notes) s.toList()..sort()],
+      difficultyIndex: difficulty.index,
+      elapsedSeconds: elapsed.inSeconds,
+      hintsLeft: hintsLeft,
+      errorCount: errorCount,
+    ));
   }
 
   // ---------- Внутреннее ----------
 
   void _pushHistory() {
-    // Заметки копируем вглубь: Set'ы изменяемые, и без копии снимок
-    // «менялся бы задним числом» вместе с текущим состоянием.
     _history.add(_Snapshot(
       _board,
       [for (final s in _notes) Set<int>.from(s)],
     ));
   }
 
-  /// Поставили цифру — убираем её из заметок строки, столбца и квадрата:
-  /// кандидатом там она быть уже не может. Ровно то, что игрок делал бы
-  /// ластиком вручную.
   void _clearPeerNotes(int row, int col, int digit) {
     for (int i = 0; i < boardSize; i++) {
       notesAt(row, i).remove(digit);
@@ -244,6 +307,10 @@ class GameController extends ChangeNotifier {
   }
 
   void _checkFinished() {
-    if (isSolved) _stopwatch.stop();
+    if (!isSolved) return;
+    _stopwatch.stop();
+    stats.recordWin(difficulty.name, elapsed.inSeconds);
+    _repository.saveStats(stats);
+    _repository.clearGame(); // партия окончена — сохранение больше не нужно
   }
 }

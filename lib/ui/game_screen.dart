@@ -1,23 +1,27 @@
-/// Главный экран: поле + панель ввода + строка статуса (таймер, ошибки)
-/// + пауза и настройки.
+/// Главный экран. Этап 4: принимает SaveRepository и передаёт его
+/// контроллеру, показывает статистику, в настройках — второй
+/// переключатель (подсветка строки/столбца/квадрата).
 library;
 
 import 'package:flutter/material.dart';
 
 import '../core/generator.dart';
+import '../data/save_repository.dart';
 import 'board_widget.dart';
 import 'game_controller.dart';
 import 'input_panel.dart';
 
 class GameScreen extends StatefulWidget {
-  const GameScreen({super.key});
+  final SaveRepository repository;
+
+  const GameScreen({super.key, required this.repository});
 
   @override
   State<GameScreen> createState() => _GameScreenState();
 }
 
 class _GameScreenState extends State<GameScreen> {
-  final GameController _controller = GameController();
+  late final GameController _controller = GameController(widget.repository);
 
   static const _difficultyNames = {
     Difficulty.easy: 'Лёгкий',
@@ -32,8 +36,6 @@ class _GameScreenState extends State<GameScreen> {
     super.dispose();
   }
 
-  /// 65 секунд -> «01:05». У Duration нет готового форматирования,
-  /// поэтому собираем строку сами.
   String _formatTime(Duration d) {
     final m = d.inMinutes.toString().padLeft(2, '0');
     final s = (d.inSeconds % 60).toString().padLeft(2, '0');
@@ -46,7 +48,11 @@ class _GameScreenState extends State<GameScreen> {
       appBar: AppBar(
         title: const Text('Судоку'),
         actions: [
-          // Настройки: пока одна — подсветка конфликтов.
+          IconButton(
+            icon: const Icon(Icons.bar_chart),
+            tooltip: 'Статистика',
+            onPressed: _showStats,
+          ),
           PopupMenuButton<void>(
             icon: const Icon(Icons.settings_outlined),
             tooltip: 'Настройки',
@@ -55,6 +61,11 @@ class _GameScreenState extends State<GameScreen> {
                 checked: _controller.highlightConflicts,
                 onTap: _controller.toggleHighlightConflicts,
                 child: const Text('Подсвечивать конфликты'),
+              ),
+              CheckedPopupMenuItem(
+                checked: _controller.highlightPeers,
+                onTap: _controller.toggleHighlightPeers,
+                child: const Text('Подсвечивать строку и квадрат'),
               ),
             ],
           ),
@@ -77,7 +88,6 @@ class _GameScreenState extends State<GameScreen> {
               builder: (context, constraints) {
                 final wide = constraints.maxWidth > 600;
 
-                // Поле + шторка паузы поверх него.
                 final board = Padding(
                   padding: const EdgeInsets.all(12),
                   child: ConstrainedBox(
@@ -136,7 +146,6 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 
-  /// Строка статуса: сложность · ошибки · таймер · пауза.
   Widget _statusRow(BuildContext context) {
     final style = Theme.of(context).textTheme.titleMedium;
     return Row(
@@ -178,6 +187,43 @@ class _GameScreenState extends State<GameScreen> {
           FilledButton(
             onPressed: () => _controller.newGame(_controller.difficulty),
             child: const Text('Новая игра'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showStats() {
+    final stats = _controller.stats;
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Статистика'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final d in Difficulty.values)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Builder(builder: (context) {
+                  final s = stats.statsFor(d.name);
+                  final best = s.bestTimeSeconds;
+                  return Text(
+                    '${_difficultyNames[d]}: побед ${s.wins}'
+                    '${best != null ? ', лучшее время ${_formatTime(Duration(seconds: best))}' : ''}',
+                  );
+                }),
+              ),
+            const Divider(),
+            Text('Текущая серия: ${stats.currentStreak}'),
+            Text('Лучшая серия: ${stats.bestStreak}'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Закрыть'),
           ),
         ],
       ),
