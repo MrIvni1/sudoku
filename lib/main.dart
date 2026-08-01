@@ -1,4 +1,10 @@
+/// Точка входа. Светлая и тёмная темы переключаются автоматически
+/// вслед за системной настройкой (themeMode: ThemeMode.system).
+library;
+
 import 'package:flutter/material.dart';
+
+import 'ui/game_screen.dart';
 
 void main() => runApp(const SudokuApp());
 
@@ -7,11 +13,23 @@ class SudokuApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
+    final seed = Colors.indigo;
+    return MaterialApp(
       title: 'Судоку',
-      home: Scaffold(
-        body: Center(child: Text('Судоку — этап 2 скоро')),
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: seed),
+        useMaterial3: true,
       ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: seed,
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+      themeMode: ThemeMode.system,
+      home: const GameScreen(),
     );
   }
 }
